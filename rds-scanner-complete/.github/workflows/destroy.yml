@@ -1,0 +1,99 @@
+name: Destroy RDS Scanner Stack
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "DELETE" to confirm stack deletion'
+        required: true
+      empty_s3_bucket:
+        description: 'Empty S3 bucket before deletion'
+        required: true
+        default: true
+        type: boolean
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: rds-scanner
+
+jobs:
+  destroy:
+    name: Delete CloudFormation Stack
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "DELETE" ]; then
+            echo "::error::Confirmation failed. You must type DELETE to proceed."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get S3 bucket name
+        if: github.event.inputs.empty_s3_bucket == 'true'
+        id: get-bucket
+        run: |
+          BUCKET_NAME=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`S3BucketName`].OutputValue' \
+            --output text)
+          echo "bucket_name=$BUCKET_NAME" >> $GITHUB_OUTPUT
+
+      - name: Empty S3 bucket
+        if: github.event.inputs.empty_s3_bucket == 'true'
+        run: |
+          echo "Emptying S3 bucket: ${{ steps.get-bucket.outputs.bucket_name }}"
+          aws s3 rm s3://${{ steps.get-bucket.outputs.bucket_name }} --recursive
+
+      - name: Delete CloudFormation stack
+        run: |
+          echo "Deleting stack: ${{ env.STACK_NAME }}"
+          aws cloudformation delete-stack --stack-name ${{ env.STACK_NAME }}
+          
+          echo "Waiting for stack deletion to complete..."
+          aws cloudformation wait stack-delete-complete --stack-name ${{ env.STACK_NAME }}
+
+      - name: Confirm deletion
+        run: |
+          echo "### Stack Deletion Complete ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The RDS Scanner stack has been successfully deleted." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Deleted resources:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Lambda function" >> $GITHUB_STEP_SUMMARY
+          echo "- S3 bucket" >> $GITHUB_STEP_SUMMARY
+          echo "- IAM role" >> $GITHUB_STEP_SUMMARY
+          echo "- EventBridge rules" >> $GITHUB_STEP_SUMMARY
+          echo "- CloudWatch log group" >> $GITHUB_STEP_SUMMARY
+
+      - name: Send Slack notification
+        if: always()
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -X POST $SLACK_WEBHOOK \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "text": "🗑️ RDS Scanner Stack Deleted",
+              "attachments": [{
+                "color": "warning",
+                "fields": [
+                  {
+                    "title": "Stack Name",
+                    "value": "'"${{ env.STACK_NAME }}"'",
+                    "short": true
+                  },
+                  {
+                    "title": "Deleted By",
+                    "value": "'"${{ github.actor }}"'",
+                    "short": true
+                  }
+                ]
+              }]
+            }'

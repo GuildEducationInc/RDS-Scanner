@@ -1,0 +1,34 @@
+[
+  {
+    "ParameterKey": "SlackWebhookURL",
+    "ParameterValue": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+  },
+  {
+    "ParameterKey": "ScanRegions",
+    "ParameterValue": "us-east-1,us-west-2"
+  },
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "rds-scanner"
+  },
+  {
+    "ParameterKey": "LambdaTimeout",
+    "ParameterValue": "900"
+  },
+  {
+    "ParameterKey": "LambdaMemorySize",
+    "ParameterValue": "512"
+  },
+  {
+    "ParameterKey": "ReportRetentionDays",
+    "ParameterValue": "90"
+  },
+  {
+    "ParameterKey": "CPUThreshold",
+    "ParameterValue": "50"
+  },
+  {
+    "ParameterKey": "TransactionThreshold",
+    "ParameterValue": "50"
+  }
+]

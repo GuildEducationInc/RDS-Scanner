@@ -1,0 +1,326 @@
+name: Deploy RDS Scanner Lambda to AWS
+
+on:
+  push:
+    branches:
+      - main
+      - dsd-258
+    paths:
+      - 'rds-scanner-complete/rds-scanner-cloudformation.yaml'
+      - 'rds-scanner-complete/parameters.json'
+      - '.github/workflows/deploy-rds-scanner.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+
+# Grant permission to ALL jobs in this workflow
+# This is needed to give the workflow the ability to use OIDC to connect to AWS
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-west-2
+  WORKING_DIR: rds-scanner-complete
+
+jobs:
+  validate:
+    name: Validate CloudFormation Template
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set environment variables
+        id: set-env
+        run: |
+          # Determine environment: use workflow input if manual trigger, otherwise use branch-based logic
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            ENV="${{ inputs.environment }}"
+          else
+            # For push events, default to development
+            ENV="development"
+          fi
+
+          echo "DEPLOY_ENV=$ENV" >> $GITHUB_OUTPUT
+
+          # Set role ARN based on environment
+          case $ENV in
+            production)
+              echo "ROLE_ARN=arn:aws:iam::947618278001:role/devops-deploy-role" >> $GITHUB_OUTPUT
+              echo "STACK_NAME=rds-scanner-prod" >> $GITHUB_OUTPUT
+              ;;
+            staging)
+              echo "ROLE_ARN=arn:aws:iam::221203628080:role/devops-deploy-role" >> $GITHUB_OUTPUT
+              echo "STACK_NAME=rds-scanner-staging" >> $GITHUB_OUTPUT
+              ;;
+            development)
+              echo "ROLE_ARN=arn:aws:iam::477873552632:role/devops-deploy-role" >> $GITHUB_OUTPUT
+              echo "STACK_NAME=rds-scanner-dev" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Assume AWS role
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ steps.set-env.outputs.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Validate CloudFormation template
+        run: |
+          aws cloudformation validate-template \
+            --template-body file://${{ env.WORKING_DIR }}/rds-scanner-cloudformation.yaml
+
+  deploy:
+    name: Deploy CloudFormation Stack
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set environment variables
+        id: set-env
+        run: |
+          # Determine environment: use workflow input if manual trigger, otherwise use branch-based logic
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            ENV="${{ inputs.environment }}"
+          else
+            # For push events, default to development
+            ENV="development"
+          fi
+
+          echo "DEPLOY_ENV=$ENV" >> $GITHUB_OUTPUT
+
+          # Set role ARN based on environment
+          case $ENV in
+            production)
+              echo "ROLE_ARN=arn:aws:iam::947618278001:role/devops-deploy-role" >> $GITHUB_OUTPUT
+              echo "STACK_NAME=rds-scanner-prod" >> $GITHUB_OUTPUT
+              ;;
+            staging)
+              echo "ROLE_ARN=arn:aws:iam::221203628080:role/devops-deploy-role" >> $GITHUB_OUTPUT
+              echo "STACK_NAME=rds-scanner-staging" >> $GITHUB_OUTPUT
+              ;;
+            development)
+              echo "ROLE_ARN=arn:aws:iam::477873552632:role/devops-deploy-role" >> $GITHUB_OUTPUT
+              echo "STACK_NAME=rds-scanner-dev" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Assume AWS role
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ steps.set-env.outputs.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create parameters file
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          cat > parameters.json <<EOF
+          [
+            {
+              "ParameterKey": "SlackWebhookURL",
+              "ParameterValue": "${{ secrets.SLACK_WEBHOOK_URL }}"
+            },
+            {
+              "ParameterKey": "ScanRegions",
+              "ParameterValue": "${{ secrets.SCAN_REGIONS || 'us-east-1,us-west-2' }}"
+            },
+            {
+              "ParameterKey": "ProjectName",
+              "ParameterValue": "rds-scanner"
+            },
+            {
+              "ParameterKey": "LambdaTimeout",
+              "ParameterValue": "900"
+            },
+            {
+              "ParameterKey": "LambdaMemorySize",
+              "ParameterValue": "512"
+            },
+            {
+              "ParameterKey": "ReportRetentionDays",
+              "ParameterValue": "90"
+            },
+            {
+              "ParameterKey": "CPUThreshold",
+              "ParameterValue": "50"
+            },
+            {
+              "ParameterKey": "TransactionThreshold",
+              "ParameterValue": "50"
+            }
+          ]
+          EOF
+
+      - name: Check if stack exists
+        id: check-stack
+        run: |
+          if aws cloudformation describe-stacks --stack-name ${{ steps.set-env.outputs.STACK_NAME }} 2>/dev/null; then
+            echo "stack_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "stack_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create CloudFormation stack
+        if: steps.check-stack.outputs.stack_exists == 'false'
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          aws cloudformation create-stack \
+            --stack-name ${{ steps.set-env.outputs.STACK_NAME }} \
+            --template-body file://rds-scanner-cloudformation.yaml \
+            --parameters file://parameters.json \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --tags Key=ManagedBy,Value=GitHub-Actions Key=Repository,Value=${{ github.repository }} Key=Branch,Value=${{ github.ref_name }} Key=Environment,Value=${{ steps.set-env.outputs.DEPLOY_ENV }}
+
+          echo "Waiting for stack creation to complete..."
+          aws cloudformation wait stack-create-complete \
+            --stack-name ${{ steps.set-env.outputs.STACK_NAME }}
+
+      - name: Update CloudFormation stack
+        if: steps.check-stack.outputs.stack_exists == 'true'
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          aws cloudformation update-stack \
+            --stack-name ${{ steps.set-env.outputs.STACK_NAME }} \
+            --template-body file://rds-scanner-cloudformation.yaml \
+            --parameters file://parameters.json \
+            --capabilities CAPABILITY_NAMED_IAM || echo "No updates to be performed"
+
+          echo "Waiting for stack update to complete..."
+          aws cloudformation wait stack-update-complete \
+            --stack-name ${{ steps.set-env.outputs.STACK_NAME }} || echo "Stack update completed or no changes"
+
+      - name: Get stack outputs
+        run: |
+          echo "### Stack Outputs" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ steps.set-env.outputs.DEPLOY_ENV }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Stack Name:** ${{ steps.set-env.outputs.STACK_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          aws cloudformation describe-stacks \
+            --stack-name ${{ steps.set-env.outputs.STACK_NAME }} \
+            --query 'Stacks[0].Outputs[*].[OutputKey,OutputValue]' \
+            --output text | while IFS=$'\t' read -r key value; do
+              echo "- **$key**: $value" >> $GITHUB_STEP_SUMMARY
+            done
+
+      - name: Test Lambda function
+        run: |
+          echo "Testing Lambda function..."
+          FUNCTION_NAME=$(aws cloudformation describe-stacks \
+            --stack-name ${{ steps.set-env.outputs.STACK_NAME }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`LambdaFunctionName`].OutputValue' \
+            --output text)
+
+          aws lambda invoke \
+            --function-name $FUNCTION_NAME \
+            --payload '{"is_monday": true}' \
+            response.json
+
+          echo "### Lambda Test Result" >> $GITHUB_STEP_SUMMARY
+          cat response.json | jq . >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload test response
+        uses: actions/upload-artifact@v3
+        with:
+          name: lambda-test-response
+          path: response.json
+
+  notify:
+    name: Notify Deployment Status
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: always()
+    steps:
+      - name: Set environment variables
+        id: set-env
+        run: |
+          # Determine environment: use workflow input if manual trigger, otherwise use branch-based logic
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            ENV="${{ inputs.environment }}"
+          else
+            # For push events, default to development
+            ENV="development"
+          fi
+
+          echo "DEPLOY_ENV=$ENV" >> $GITHUB_OUTPUT
+
+          # Set stack name based on environment
+          case $ENV in
+            production)
+              echo "STACK_NAME=rds-scanner-prod" >> $GITHUB_OUTPUT
+              ;;
+            staging)
+              echo "STACK_NAME=rds-scanner-staging" >> $GITHUB_OUTPUT
+              ;;
+            development)
+              echo "STACK_NAME=rds-scanner-dev" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Send Slack notification
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ "${{ needs.deploy.result }}" == "success" ]; then
+            STATUS="Success"
+            COLOR="good"
+          else
+            STATUS="Failed"
+            COLOR="danger"
+          fi
+
+          curl -X POST $SLACK_WEBHOOK \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "attachments": [{
+                "color": "'"$COLOR"'",
+                "title": "RDS Scanner Lambda Deployment",
+                "text": "Deployment Status: '"$STATUS"'",
+                "fields": [
+                  {
+                    "title": "Environment",
+                    "value": "'"${{ steps.set-env.outputs.DEPLOY_ENV }}"'",
+                    "short": true
+                  },
+                  {
+                    "title": "Stack Name",
+                    "value": "'"${{ steps.set-env.outputs.STACK_NAME }}"'",
+                    "short": true
+                  },
+                  {
+                    "title": "Repository",
+                    "value": "'"${{ github.repository }}"'",
+                    "short": true
+                  },
+                  {
+                    "title": "Branch",
+                    "value": "'"${{ github.ref_name }}"'",
+                    "short": true
+                  },
+                  {
+                    "title": "Commit",
+                    "value": "'"${{ github.sha }}"'",
+                    "short": false
+                  },
+                  {
+                    "title": "Actor",
+                    "value": "'"${{ github.actor }}"'",
+                    "short": true
+                  }
+                ],
+                "footer": "GitHub Actions",
+                "footer_icon": "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
+                "ts": '"$(date +%s)"'
+              }]
+            }'

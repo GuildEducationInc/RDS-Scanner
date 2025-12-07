@@ -1,0 +1,74 @@
+name: Validate Pull Request
+
+on:
+  pull_request:
+    branches:
+      - main
+      - production
+    paths:
+      - 'rds-scanner-cloudformation.yaml'
+      - 'parameters.json'
+      - '.github/workflows/**'
+
+jobs:
+  validate:
+    name: Validate CloudFormation Template
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Validate CloudFormation template
+        run: |
+          echo "### CloudFormation Validation" >> $GITHUB_STEP_SUMMARY
+          if aws cloudformation validate-template \
+            --template-body file://rds-scanner-cloudformation.yaml > validation.json; then
+            echo "✅ Template is valid" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Template Description:**" >> $GITHUB_STEP_SUMMARY
+            cat validation.json | jq -r '.Description' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Parameters:**" >> $GITHUB_STEP_SUMMARY
+            cat validation.json | jq -r '.Parameters[] | "- \(.ParameterKey): \(.Description)"' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Template validation failed" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+      - name: Check for secrets in code
+        run: |
+          echo "### Security Scan" >> $GITHUB_STEP_SUMMARY
+          if grep -r "AKIA" . || grep -r "hooks.slack.com/services" . --exclude-dir=.github; then
+            echo "::error::Potential secrets found in code!"
+            echo "❌ Secrets detected in code" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "✅ No secrets detected" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Lint CloudFormation template
+        uses: scottbrenner/cfn-lint-action@v2
+        with:
+          args: "rds-scanner-cloudformation.yaml"
+
+      - name: Comment on PR
+        uses: actions/github-script@v6
+        if: always()
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = fs.readFileSync(process.env.GITHUB_STEP_SUMMARY, 'utf8');
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## CloudFormation Validation Results\n\n${summary}`
+            });

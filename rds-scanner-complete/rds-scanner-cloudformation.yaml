@@ -1,0 +1,507 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'RDS Database Scanner - Automated scanning with Slack notifications on Mondays and Fridays'
+
+Parameters:
+  SlackWebhookURL:
+    Type: String
+    Description: 'Slack Webhook URL for notifications (e.g., https://hooks.slack.com/services/XXX/YYY/ZZZ)'
+    NoEcho: true
+    
+  ScanRegions:
+    Type: CommaDelimitedList
+    Description: 'Comma-separated list of AWS regions to scan'
+    Default: 'us-east-1,us-west-2'
+    
+  ProjectName:
+    Type: String
+    Description: 'Project name for resource naming'
+    Default: 'rds-scanner'
+    
+  LambdaTimeout:
+    Type: Number
+    Description: 'Lambda timeout in seconds'
+    Default: 900
+    MinValue: 300
+    MaxValue: 900
+    
+  LambdaMemorySize:
+    Type: Number
+    Description: 'Lambda memory size in MB'
+    Default: 512
+    AllowedValues: [256, 512, 1024, 2048, 3008]
+    
+  ReportRetentionDays:
+    Type: Number
+    Description: 'Number of days to retain reports in S3'
+    Default: 90
+    
+  CPUThreshold:
+    Type: Number
+    Description: 'CPU utilization threshold percentage for underused databases'
+    Default: 50
+    MinValue: 0
+    MaxValue: 100
+    
+  TransactionThreshold:
+    Type: Number
+    Description: 'Transaction threshold per month for underused databases'
+    Default: 50
+    MinValue: 0
+
+Resources:
+  # S3 Bucket for Reports
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-reports-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldReports
+            Status: Enabled
+            ExpirationInDays: !Ref ReportRetentionDays
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-reports'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub '${ProjectName}-lambda-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: RDSReadPermissions
+                Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBClusters
+                  - rds:ListTagsForResource
+                Resource: '*'
+              - Sid: CloudWatchMetricsPermissions
+                Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                Resource: '*'
+              - Sid: S3WritePermissions
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                Resource: !Sub '${ReportsBucket.Arn}/*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-lambda-role'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # Lambda Function
+  ScannerLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-function'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: !Ref LambdaTimeout
+      MemorySize: !Ref LambdaMemorySize
+      Environment:
+        Variables:
+          REGIONS: !Join [',', !Ref ScanRegions]
+          S3_BUCKET: !Ref ReportsBucket
+          SLACK_WEBHOOK_URL: !Ref SlackWebhookURL
+          CPU_THRESHOLD: !Ref CPUThreshold
+          TRANSACTION_THRESHOLD: !Ref TransactionThreshold
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import boto3
+          import csv
+          import urllib3
+          from datetime import datetime, timedelta
+          from typing import List, Dict, Any
+          
+          http = urllib3.PoolManager()
+          
+          class RDSScanner:
+              def __init__(self, region: str):
+                  self.rds_client = boto3.client('rds', region_name=region)
+                  self.cloudwatch_client = boto3.client('cloudwatch', region_name=region)
+                  self.region = region
+                  self.cpu_threshold = float(os.environ.get('CPU_THRESHOLD', '50'))
+                  self.transaction_threshold = float(os.environ.get('TRANSACTION_THRESHOLD', '50'))
+                  
+              def get_all_db_instances(self) -> List[Dict[str, Any]]:
+                  instances = []
+                  try:
+                      paginator = self.rds_client.get_paginator('describe_db_instances')
+                      for page in paginator.paginate():
+                          instances.extend(page['DBInstances'])
+                  except Exception as e:
+                      print(f"Error retrieving DB instances in {self.region}: {e}")
+                  return instances
+              
+              def get_cloudwatch_metric(self, db_instance_id: str, metric_name: str, 
+                                       start_time: datetime, end_time: datetime, 
+                                       statistic: str = 'Average') -> float:
+                  try:
+                      response = self.cloudwatch_client.get_metric_statistics(
+                          Namespace='AWS/RDS',
+                          MetricName=metric_name,
+                          Dimensions=[{'Name': 'DBInstanceIdentifier', 'Value': db_instance_id}],
+                          StartTime=start_time,
+                          EndTime=end_time,
+                          Period=86400,
+                          Statistics=[statistic]
+                      )
+                      if response['Datapoints']:
+                          values = [dp[statistic] for dp in response['Datapoints']]
+                          return sum(values) / len(values) if values else 0.0
+                      return 0.0
+                  except Exception as e:
+                      print(f"Error getting metric {metric_name} for {db_instance_id}: {e}")
+                      return 0.0
+              
+              def get_transaction_count(self, db_instance_id: str, start_time: datetime, end_time: datetime) -> float:
+                  read_iops = self.get_cloudwatch_metric(db_instance_id, 'ReadIOPS', start_time, end_time, 'Sum')
+                  write_iops = self.get_cloudwatch_metric(db_instance_id, 'WriteIOPS', start_time, end_time, 'Sum')
+                  return read_iops + write_iops
+              
+              def get_cpu_utilization(self, db_instance_id: str, start_time: datetime, end_time: datetime) -> float:
+                  return self.get_cloudwatch_metric(db_instance_id, 'CPUUtilization', start_time, end_time, 'Average')
+              
+              def get_db_tags(self, db_arn: str) -> Dict[str, str]:
+                  try:
+                      response = self.rds_client.list_tags_for_resource(ResourceName=db_arn)
+                      tags = {tag['Key']: tag['Value'] for tag in response['TagList']}
+                      return {
+                          'owner': tags.get('Owner', tags.get('owner', 'N/A')),
+                          'contact': tags.get('Contact', tags.get('contact', 'N/A')),
+                          'repo': tags.get('Repo', tags.get('repo', tags.get('Repository', 'N/A'))),
+                          'environment': tags.get('Environment', tags.get('environment', 'N/A'))
+                      }
+                  except Exception as e:
+                      print(f"Error getting tags for {db_arn}: {e}")
+                      return {'owner': 'N/A', 'contact': 'N/A', 'repo': 'N/A', 'environment': 'N/A'}
+              
+              def categorize_database(self, db_instance: Dict[str, Any]) -> Dict[str, Any]:
+                  db_id = db_instance['DBInstanceIdentifier']
+                  db_arn = db_instance['DBInstanceArn']
+                  engine = db_instance['Engine']
+                  instance_class = db_instance['DBInstanceClass']
+                  status = db_instance['DBInstanceStatus']
+                  
+                  end_time = datetime.utcnow()
+                  six_months_ago = end_time - timedelta(days=180)
+                  one_month_ago = end_time - timedelta(days=30)
+                  
+                  print(f"Analyzing: {db_id} ({engine}) in {self.region}...")
+                  
+                  cpu_6_months = self.get_cpu_utilization(db_id, six_months_ago, end_time)
+                  transactions_6_months = self.get_transaction_count(db_id, six_months_ago, end_time)
+                  transactions_1_month = self.get_transaction_count(db_id, one_month_ago, end_time)
+                  
+                  tags = self.get_db_tags(db_arn)
+                  
+                  category = 'Active'
+                  reason = ''
+                  
+                  if transactions_6_months == 0:
+                      category = 'Unused'
+                      reason = 'Zero transactions in last 6 months'
+                  elif cpu_6_months < self.cpu_threshold or transactions_1_month < self.transaction_threshold:
+                      category = 'Underused'
+                      reasons = []
+                      if cpu_6_months < self.cpu_threshold:
+                          reasons.append(f'CPU: {cpu_6_months:.2f}%')
+                      if transactions_1_month < self.transaction_threshold:
+                          reasons.append(f'Transactions/month: {transactions_1_month:.0f}')
+                      reason = '; '.join(reasons)
+                  
+                  return {
+                      'db_identifier': db_id,
+                      'engine': engine,
+                      'instance_class': instance_class,
+                      'status': status,
+                      'region': self.region,
+                      'category': category,
+                      'reason': reason,
+                      'cpu_utilization_6mo': f'{cpu_6_months:.2f}%',
+                      'transactions_6mo': f'{transactions_6_months:.0f}',
+                      'transactions_1mo': f'{transactions_1_month:.0f}',
+                      'owner': tags['owner'],
+                      'contact': tags['contact'],
+                      'repo': tags['repo'],
+                      'environment': tags['environment']
+                  }
+              
+              def scan_databases(self) -> List[Dict[str, Any]]:
+                  print(f"Scanning RDS instances in region: {self.region}")
+                  instances = self.get_all_db_instances()
+                  print(f"Found {len(instances)} database instances in {self.region}")
+                  return [self.categorize_database(instance) for instance in instances]
+          
+          def send_slack_message(webhook_url: str, message: dict):
+              try:
+                  encoded_msg = json.dumps(message).encode('utf-8')
+                  resp = http.request('POST', webhook_url, body=encoded_msg, headers={'Content-Type': 'application/json'})
+                  print(f"Slack message sent: {resp.status}")
+              except Exception as e:
+                  print(f"Error sending Slack message: {e}")
+          
+          def format_slack_message(results: List[Dict[str, Any]], s3_bucket: str, timestamp: str, is_monday: bool = False) -> dict:
+              unused = [r for r in results if r['category'] == 'Unused']
+              underused = [r for r in results if r['category'] == 'Underused']
+              active = [r for r in results if r['category'] == 'Active']
+              
+              # Calculate potential savings (rough estimate)
+              unused_monthly_cost = len(unused) * 100  # Assuming $100/db/month average
+              underused_savings = len(underused) * 50  # Assuming $50/db/month if downsized
+              
+              pretext = ""
+              if is_monday:
+                  pretext = "⏰ *REMINDER*: Weekly RDS Database Scan - Please review unused and underused databases for cost optimization!"
+              
+              blocks = []
+              
+              if pretext:
+                  blocks.append({
+                      "type": "section",
+                      "text": {"type": "mrkdwn", "text": pretext}
+                  })
+                  blocks.append({"type": "divider"})
+              
+              blocks.extend([
+                  {
+                      "type": "header",
+                      "text": {"type": "plain_text", "text": "🗄️ RDS Database Scan Results"}
+                  },
+                  {
+                      "type": "section",
+                      "fields": [
+                          {"type": "mrkdwn", "text": f"*Total Databases:*\n{len(results)}"},
+                          {"type": "mrkdwn", "text": f"*Scan Date:*\n{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"},
+                          {"type": "mrkdwn", "text": f"*❌ Unused:*\n{len(unused)}"},
+                          {"type": "mrkdwn", "text": f"*⚠️ Underused:*\n{len(underused)}"},
+                          {"type": "mrkdwn", "text": f"*✅ Active:*\n{len(active)}"},
+                          {"type": "mrkdwn", "text": f"*💰 Potential Savings:*\n~${unused_monthly_cost + underused_savings:,}/month"}
+                      ]
+                  },
+                  {"type": "divider"}
+              ])
+              
+              if unused:
+                  unused_text = "*Unused Databases (Zero transactions in 6 months):*\n"
+                  for db in unused[:5]:
+                      unused_text += f"• `{db['db_identifier']}` ({db['engine']}) - Owner: {db['owner']}\n"
+                  if len(unused) > 5:
+                      unused_text += f"_... and {len(unused) - 5} more unused databases_\n"
+                  blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": unused_text}})
+              
+              if underused:
+                  underused_text = "*Underused Databases (CPU < 50% OR transactions < 50/month):*\n"
+                  for db in underused[:5]:
+                      underused_text += f"• `{db['db_identifier']}` - {db['reason']} - Owner: {db['owner']}\n"
+                  if len(underused) > 5:
+                      underused_text += f"_... and {len(underused) - 5} more underused databases_\n"
+                  blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": underused_text}})
+              
+              blocks.extend([
+                  {"type": "divider"},
+                  {
+                      "type": "section",
+                      "text": {
+                          "type": "mrkdwn",
+                          "text": f"📊 *Full Report:*\n`s3://{s3_bucket}/rds-scans/rds_scan_{timestamp}.csv`"
+                      }
+                  }
+              ])
+              
+              return {"blocks": blocks}
+          
+          def export_to_csv(results: List[Dict[str, Any]], filename: str):
+              if not results:
+                  return
+              fieldnames = ['db_identifier', 'engine', 'instance_class', 'status', 'region', 
+                           'category', 'reason', 'cpu_utilization_6mo', 'transactions_6mo', 
+                           'transactions_1mo', 'owner', 'contact', 'repo', 'environment']
+              with open(filename, 'w', newline='') as csvfile:
+                  writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                  writer.writeheader()
+                  writer.writerows(results)
+          
+          def upload_to_s3(filename: str, bucket: str, key: str):
+              s3_client = boto3.client('s3')
+              try:
+                  s3_client.upload_file(filename, bucket, key)
+                  print(f"Uploaded {filename} to s3://{bucket}/{key}")
+              except Exception as e:
+                  print(f"Error uploading to S3: {e}")
+          
+          def lambda_handler(event, context):
+              regions = os.environ.get('REGIONS', 'us-east-1').split(',')
+              s3_bucket = os.environ.get('S3_BUCKET')
+              slack_webhook = os.environ.get('SLACK_WEBHOOK_URL')
+              
+              # Check if this is a Monday or Friday run
+              is_monday = event.get('is_monday', False)
+              
+              all_results = []
+              for region in regions:
+                  region = region.strip()
+                  try:
+                      scanner = RDSScanner(region=region)
+                      results = scanner.scan_databases()
+                      all_results.extend(results)
+                  except Exception as e:
+                      print(f"Error scanning region {region}: {e}")
+                      continue
+              
+              if not all_results:
+                  return {'statusCode': 200, 'body': json.dumps('No databases found')}
+              
+              timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+              csv_filename = f'/tmp/rds_scan_{timestamp}.csv'
+              
+              export_to_csv(all_results, csv_filename)
+              
+              if s3_bucket:
+                  upload_to_s3(csv_filename, s3_bucket, f'rds-scans/rds_scan_{timestamp}.csv')
+              
+              if slack_webhook:
+                  slack_message = format_slack_message(all_results, s3_bucket, timestamp, is_monday)
+                  send_slack_message(slack_webhook, slack_message)
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'total_databases': len(all_results),
+                      'unused': len([r for r in all_results if r['category'] == 'Unused']),
+                      'underused': len([r for r in all_results if r['category'] == 'Underused'])
+                  })
+              }
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-function'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # CloudWatch Log Group
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ScannerLambdaFunction}'
+      RetentionInDays: 30
+
+  # EventBridge Rule - Monday Schedule with Reminder
+  MondayScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-monday-schedule'
+      Description: 'Trigger RDS scanner every Monday at 9 AM UTC with reminder'
+      ScheduleExpression: 'cron(0 9 ? * MON *)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ScannerLambdaFunction.Arn
+          Id: MondayTarget
+          Input: '{"is_monday": true}'
+
+  # EventBridge Rule - Friday Schedule
+  FridayScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-friday-schedule'
+      Description: 'Trigger RDS scanner every Friday at 9 AM UTC'
+      ScheduleExpression: 'cron(0 9 ? * FRI *)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ScannerLambdaFunction.Arn
+          Id: FridayTarget
+          Input: '{"is_monday": false}'
+
+  # Lambda Permission for Monday EventBridge Rule
+  MondayLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScannerLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MondayScheduleRule.Arn
+
+  # Lambda Permission for Friday EventBridge Rule
+  FridayLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScannerLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt FridayScheduleRule.Arn
+
+Outputs:
+  S3BucketName:
+    Description: S3 bucket for reports
+    Value: !Ref ReportsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ReportsBucket'
+
+  LambdaFunctionName:
+    Description: Lambda function name
+    Value: !Ref ScannerLambdaFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaFunction'
+
+  LambdaFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt ScannerLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaFunctionArn'
+
+  LambdaExecutionRoleArn:
+    Description: Lambda execution role ARN
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaExecutionRole'
+
+  CloudWatchLogGroup:
+    Description: CloudWatch log group for Lambda
+    Value: !Ref LambdaLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-LogGroup'
+
+  MondaySchedule:
+    Description: Monday EventBridge rule
+    Value: !Ref MondayScheduleRule
+    Export:
+      Name: !Sub '${AWS::StackName}-MondayRule'
+
+  FridaySchedule:
+    Description: Friday EventBridge rule
+    Value: !Ref FridayScheduleRule
+    Export:
+      Name: !Sub '${AWS::StackName}-FridayRule'

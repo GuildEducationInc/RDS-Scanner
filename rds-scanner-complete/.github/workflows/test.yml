@@ -1,0 +1,114 @@
+name: Test RDS Scanner
+
+on:
+  workflow_dispatch:
+    inputs:
+      is_monday:
+        description: 'Test with Monday reminder'
+        required: true
+        default: true
+        type: boolean
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: rds-scanner
+
+jobs:
+  test:
+    name: Test Lambda Function
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get Lambda function name
+        id: get-function
+        run: |
+          FUNCTION_NAME=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`LambdaFunctionName`].OutputValue' \
+            --output text)
+          echo "function_name=$FUNCTION_NAME" >> $GITHUB_OUTPUT
+
+      - name: Invoke Lambda function
+        run: |
+          echo "Invoking Lambda function: ${{ steps.get-function.outputs.function_name }}"
+          
+          aws lambda invoke \
+            --function-name ${{ steps.get-function.outputs.function_name }} \
+            --payload '{"is_monday": ${{ github.event.inputs.is_monday }}}' \
+            --log-type Tail \
+            --query 'LogResult' \
+            --output text response.json | base64 --decode > lambda-logs.txt
+
+      - name: Display response
+        run: |
+          echo "### Lambda Execution Response" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          cat response.json | jq . >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Lambda Logs" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat lambda-logs.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: lambda-test-results
+          path: |
+            response.json
+            lambda-logs.txt
+
+      - name: Check for errors
+        run: |
+          if grep -q "errorMessage" response.json; then
+            echo "::error::Lambda function returned an error"
+            exit 1
+          fi
+
+      - name: Notify Slack
+        if: always()
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          STATUS="${{ job.status }}"
+          if [ "$STATUS" == "success" ]; then
+            COLOR="good"
+            EMOJI="✅"
+          else
+            COLOR="danger"
+            EMOJI="❌"
+          fi
+          
+          curl -X POST $SLACK_WEBHOOK \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "attachments": [{
+                "color": "'"$COLOR"'",
+                "title": "'"$EMOJI"' RDS Scanner Test",
+                "text": "Manual test triggered from GitHub Actions",
+                "fields": [
+                  {
+                    "title": "Test Type",
+                    "value": "'"${{ github.event.inputs.is_monday == 'true' && 'Monday (with reminder)' || 'Friday (regular)' }}"'",
+                    "short": true
+                  },
+                  {
+                    "title": "Status",
+                    "value": "'"$STATUS"'",
+                    "short": true
+                  },
+                  {
+                    "title": "Triggered By",
+                    "value": "'"${{ github.actor }}"'",
+                    "short": true
+                  }
+                ]
+              }]
+            }'
