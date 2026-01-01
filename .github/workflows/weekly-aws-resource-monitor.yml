@@ -52,7 +52,7 @@ jobs:
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
       - name: Upload Dev CSV report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: dev-resource-report
@@ -98,7 +98,7 @@ jobs:
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
       - name: Upload Stage CSV report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: stage-resource-report
@@ -112,13 +112,13 @@ jobs:
     if: always()
     steps:
       - name: Download Dev report
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: dev-resource-report
           path: reports/dev
 
       - name: Download Stage report
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: stage-resource-report
           path: reports/stage
@@ -138,6 +138,7 @@ jobs:
     if: always()
     steps:
       - name: Send completion notification
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
