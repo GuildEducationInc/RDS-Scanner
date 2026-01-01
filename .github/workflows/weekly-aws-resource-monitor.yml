@@ -105,10 +105,56 @@ jobs:
           path: aws_resource_report_*.csv
           retention-days: 30
 
+  scan-prod-environment:
+    name: Scan Prod Environment
+    runs-on: ubuntu-latest
+    needs: scan-stage-environment
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-monitor.txt
+
+      - name: Assume AWS Prod role
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::947618278001:role/devops-deploy-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Scan Prod resources
+        run: |
+          python3 -u aws_resource_monitor.py \
+            --slack-webhook "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            --prod-profile "" \
+            --environments prod \
+            --region ${{ env.AWS_REGION }}
+        env:
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      - name: Upload Prod CSV report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prod-resource-report
+          path: aws_resource_report_*.csv
+          retention-days: 30
+
   send-combined-report:
     name: Send Combined Report to Slack
     runs-on: ubuntu-latest
-    needs: [scan-dev-environment, scan-stage-environment]
+    needs: [scan-dev-environment, scan-stage-environment, scan-prod-environment]
     if: always()
     steps:
       - name: Download Dev report
@@ -123,6 +169,12 @@ jobs:
           name: stage-resource-report
           path: reports/stage
 
+      - name: Download Prod report
+        uses: actions/download-artifact@v4
+        with:
+          name: prod-resource-report
+          path: reports/prod
+
       - name: List downloaded reports
         run: |
           echo "Dev reports:"
@@ -130,18 +182,21 @@ jobs:
           echo ""
           echo "Stage reports:"
           ls -la reports/stage/ || echo "No stage reports found"
+          echo ""
+          echo "Prod reports:"
+          ls -la reports/prod/ || echo "No prod reports found"
 
   notify-completion:
     name: Notify Scan Completion
     runs-on: ubuntu-latest
-    needs: [scan-dev-environment, scan-stage-environment, send-combined-report]
+    needs: [scan-dev-environment, scan-stage-environment, scan-prod-environment, send-combined-report]
     if: always()
     steps:
       - name: Send completion notification
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          if [ "${{ needs.scan-dev-environment.result }}" == "success" ] && [ "${{ needs.scan-stage-environment.result }}" == "success" ]; then
+          if [ "${{ needs.scan-dev-environment.result }}" == "success" ] && [ "${{ needs.scan-stage-environment.result }}" == "success" ] && [ "${{ needs.scan-prod-environment.result }}" == "success" ]; then
             STATUS="Success"
             EMOJI=":white_check_mark:"
             COLOR="good"
@@ -172,6 +227,11 @@ jobs:
                   {
                     "title": "Stage Status",
                     "value": "'"${{ needs.scan-stage-environment.result }}"'",
+                    "short": true
+                  },
+                  {
+                    "title": "Prod Status",
+                    "value": "'"${{ needs.scan-prod-environment.result }}"'",
                     "short": true
                   },
                   {

@@ -489,8 +489,9 @@ def main():
     parser.add_argument('--google-credentials', help='Path to Google service account credentials JSON')
     parser.add_argument('--dev-profile', default='guild-dev', help='AWS profile for dev environment')
     parser.add_argument('--stage-profile', default='guild-stage', help='AWS profile for staging environment')
+    parser.add_argument('--prod-profile', default='guild-prod', help='AWS profile for production environment')
     parser.add_argument('--region', default='us-west-2', help='AWS region (default: us-west-2)')
-    parser.add_argument('--environments', default='dev,stage', help='Comma-separated list of environments to scan: dev, stage, or both (default: dev,stage)')
+    parser.add_argument('--environments', default='dev,stage', help='Comma-separated list of environments to scan: dev, stage, prod, or any combination (default: dev,stage)')
 
     args = parser.parse_args()
 
@@ -507,6 +508,8 @@ def main():
         environments.append(('dev', args.dev_profile))
     if 'stage' in env_list:
         environments.append(('stage', args.stage_profile))
+    if 'prod' in env_list:
+        environments.append(('prod', args.prod_profile))
 
     all_results = {}
 
