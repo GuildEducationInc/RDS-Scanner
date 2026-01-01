@@ -138,7 +138,6 @@ jobs:
     if: always()
     steps:
       - name: Send completion notification
-        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
