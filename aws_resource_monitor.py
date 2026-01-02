@@ -485,13 +485,15 @@ def upload_to_google_drive(filename, credentials_file=None):
 
 def main():
     parser = argparse.ArgumentParser(description='AWS Resource Monitor - Multi-environment scanner')
-    parser.add_argument('--slack-webhook', required=True, help='Slack webhook URL')
+    parser.add_argument('--slack-webhook', help='Slack webhook URL')
+    parser.add_argument('--skip-slack', action='store_true', help='Skip sending Slack notification')
     parser.add_argument('--google-credentials', help='Path to Google service account credentials JSON')
     parser.add_argument('--dev-profile', default='guild-dev', help='AWS profile for dev environment')
     parser.add_argument('--stage-profile', default='guild-stage', help='AWS profile for staging environment')
     parser.add_argument('--prod-profile', default='guild-prod', help='AWS profile for production environment')
     parser.add_argument('--region', default='us-west-2', help='AWS region (default: us-west-2)')
     parser.add_argument('--environments', default='dev,stage', help='Comma-separated list of environments to scan: dev, stage, prod, or any combination (default: dev,stage)')
+    parser.add_argument('--output-json', help='Save results to JSON file for later consolidation')
 
     args = parser.parse_args()
 
@@ -554,20 +556,30 @@ def main():
     monitor = AWSResourceMonitor(args.dev_profile, 'dev', args.region)
     csv_filename = monitor.generate_csv_report(all_results)
 
+    # Save results to JSON if requested
+    if args.output_json:
+        with open(args.output_json, 'w') as f:
+            json.dump(all_results, f, indent=2, default=str)
+        print(f"\n✓ Results saved to JSON: {args.output_json}")
+
     # Upload to Google Drive
     if args.google_credentials:
         upload_to_google_drive(csv_filename, args.google_credentials)
     else:
         upload_to_google_drive(csv_filename)
 
-    # Send Slack notification
-    send_slack_notification(args.slack_webhook, all_results)
+    # Send Slack notification (unless skipped)
+    if not args.skip_slack:
+        if not args.slack_webhook:
+            print("\n⚠ Warning: --slack-webhook required when not using --skip-slack")
+        else:
+            send_slack_notification(args.slack_webhook, all_results)
+            print(f"Slack notification sent: {args.slack_webhook[:50]}...")
 
     print(f"\n{'='*80}")
     print("MONITORING COMPLETE")
     print(f"{'='*80}")
     print(f"CSV Report: {csv_filename}")
-    print(f"Slack notification sent: {args.slack_webhook[:50]}...")
 
 
 if __name__ == "__main__":

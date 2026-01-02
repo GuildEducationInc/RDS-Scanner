@@ -43,7 +43,8 @@ jobs:
       - name: Scan Dev resources
         run: |
           python3 -u aws_resource_monitor.py \
-            --slack-webhook "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            --skip-slack \
+            --output-json dev-results.json \
             --dev-profile "" \
             --environments dev \
             --region ${{ env.AWS_REGION }}
@@ -51,13 +52,13 @@ jobs:
           AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-      # - name: Upload Dev CSV report
-      #   uses: actions/upload-artifact@v4
-      #   if: always()
-      #   with:
-      #     name: dev-resource-report
-      #     path: aws_resource_report_*.csv
-      #     retention-days: 30
+      - name: Upload Dev JSON results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dev-results
+          path: dev-results.json
+          retention-days: 7
 
   scan-stage-environment:
     name: Scan Stage Environment
@@ -89,7 +90,8 @@ jobs:
       - name: Scan Stage resources
         run: |
           python3 -u aws_resource_monitor.py \
-            --slack-webhook "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            --skip-slack \
+            --output-json stage-results.json \
             --stage-profile "" \
             --environments stage \
             --region ${{ env.AWS_REGION }}
@@ -97,13 +99,13 @@ jobs:
           AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-      # - name: Upload Stage CSV report
-      #   uses: actions/upload-artifact@v4
-      #   if: always()
-      #   with:
-      #     name: stage-resource-report
-      #     path: aws_resource_report_*.csv
-      #     retention-days: 30
+      - name: Upload Stage JSON results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stage-results
+          path: stage-results.json
+          retention-days: 7
 
   scan-prod-environment:
     name: Scan Prod Environment
@@ -135,7 +137,8 @@ jobs:
       - name: Scan Prod resources
         run: |
           python3 -u aws_resource_monitor.py \
-            --slack-webhook "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            --skip-slack \
+            --output-json prod-results.json \
             --prod-profile "" \
             --environments prod \
             --region ${{ env.AWS_REGION }}
@@ -143,53 +146,70 @@ jobs:
           AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-      # - name: Upload Prod CSV report
-      #   uses: actions/upload-artifact@v4
-      #   if: always()
-      #   with:
-      #     name: prod-resource-report
-      #     path: aws_resource_report_*.csv
-      #     retention-days: 30
+      - name: Upload Prod JSON results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prod-results
+          path: prod-results.json
+          retention-days: 7
 
-  # send-combined-report:
-  #   name: Send Combined Report to Slack
-  #   runs-on: ubuntu-latest
-  #   needs: [scan-dev-environment, scan-stage-environment, scan-prod-environment]
-  #   if: always()
-  #   steps:
-  #     - name: Download Dev report
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: dev-resource-report
-  #         path: reports/dev
+  send-consolidated-slack-notification:
+    name: Send Consolidated Slack Notification
+    runs-on: ubuntu-latest
+    needs: [scan-dev-environment, scan-stage-environment, scan-prod-environment]
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-  #     - name: Download Stage report
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: stage-resource-report
-  #         path: reports/stage
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
 
-  #     - name: Download Prod report
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: prod-resource-report
-  #         path: reports/prod
+      - name: Install dependencies
+        run: |
+          pip install requests
 
-  #     - name: List downloaded reports
-  #       run: |
-  #         echo "Dev reports:"
-  #         ls -la reports/dev/ || echo "No dev reports found"
-  #         echo ""
-  #         echo "Stage reports:"
-  #         ls -la reports/stage/ || echo "No stage reports found"
-  #         echo ""
-  #         echo "Prod reports:"
-  #         ls -la reports/prod/ || echo "No prod reports found"
+      - name: Download Dev results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: dev-results
+          path: results/
+
+      - name: Download Stage results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: stage-results
+          path: results/
+
+      - name: Download Prod results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: prod-results
+          path: results/
+
+      - name: List downloaded results
+        run: |
+          echo "Downloaded results:"
+          ls -la results/ || echo "No results found"
+
+      - name: Consolidate and send Slack notification
+        env:
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 consolidate_and_notify.py \
+            --json-dir results/ \
+            --slack-webhook "${{ secrets.SLACK_WEBHOOK_URL }}"
 
   notify-completion:
     name: Notify Scan Completion
     runs-on: ubuntu-latest
-    needs: [scan-dev-environment, scan-stage-environment, scan-prod-environment]
+    needs: [scan-dev-environment, scan-stage-environment, scan-prod-environment, send-consolidated-slack-notification]
     if: always()
     steps:
       - name: Send completion notification
