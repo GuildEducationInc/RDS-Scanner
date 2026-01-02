@@ -59,6 +59,7 @@ jobs:
           name: dev-results
           path: dev-results.json
           retention-days: 7
+          if-no-files-found: ignore
 
   scan-stage-environment:
     name: Scan Stage Environment
@@ -106,6 +107,7 @@ jobs:
           name: stage-results
           path: stage-results.json
           retention-days: 7
+          if-no-files-found: ignore
 
   scan-prod-environment:
     name: Scan Prod Environment
@@ -153,6 +155,7 @@ jobs:
           name: prod-results
           path: prod-results.json
           retention-days: 7
+          if-no-files-found: ignore
 
   send-consolidated-slack-notification:
     name: Send Consolidated Slack Notification
