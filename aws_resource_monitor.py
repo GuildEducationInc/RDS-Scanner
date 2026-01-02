@@ -264,60 +264,60 @@ class AWSResourceMonitor:
             'old_log_groups': old_log_groups[:20]  # Top 20 old log groups
         }
 
-    def generate_csv_report(self, all_results):
-        """Generate CSV report for all environments."""
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f'aws_resource_report_{timestamp}.csv'
+def generate_csv_report(all_results):
+    """Generate CSV report for all environments."""
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f'aws_resource_report_{timestamp}.csv'
 
-        with open(filename, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
+    with open(filename, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
 
-            # Write header
-            writer.writerow(['AWS Resource Usage Report'])
-            writer.writerow(['Generated:', datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
+        # Write header
+        writer.writerow(['AWS Resource Usage Report'])
+        writer.writerow(['Generated:', datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
+        writer.writerow([])
+
+        for env, results in all_results.items():
+            writer.writerow([f'=== {env.upper()} ENVIRONMENT ==='])
             writer.writerow([])
 
-            for env, results in all_results.items():
-                writer.writerow([f'=== {env.upper()} ENVIRONMENT ==='])
-                writer.writerow([])
+            # Lambda section
+            writer.writerow(['Lambda Storage'])
+            writer.writerow(['Total Functions', results['lambda']['total_functions']])
+            writer.writerow(['Storage Used (GB)', results['lambda']['total_storage_gb']])
+            writer.writerow(['Storage Limit (GB)', results['lambda']['storage_limit_gb']])
+            writer.writerow(['Storage Usage %', results['lambda']['storage_percent']])
+            writer.writerow(['Unused Functions', results['lambda']['unused_count']])
+            writer.writerow(['Functions with Version Bloat (>10 versions)', results['lambda']['version_bloat_count']])
+            writer.writerow([])
 
-                # Lambda section
-                writer.writerow(['Lambda Storage'])
-                writer.writerow(['Total Functions', results['lambda']['total_functions']])
-                writer.writerow(['Storage Used (GB)', results['lambda']['total_storage_gb']])
-                writer.writerow(['Storage Limit (GB)', results['lambda']['storage_limit_gb']])
-                writer.writerow(['Storage Usage %', results['lambda']['storage_percent']])
-                writer.writerow(['Unused Functions', results['lambda']['unused_count']])
-                writer.writerow(['Functions with Version Bloat (>10 versions)', results['lambda']['version_bloat_count']])
-                writer.writerow([])
+            # IAM section
+            writer.writerow(['IAM Roles'])
+            writer.writerow(['Total Roles', results['iam']['total_roles']])
+            writer.writerow(['Roles Quota', results['iam']['roles_quota']])
+            writer.writerow(['Usage %', results['iam']['roles_percent']])
+            writer.writerow([])
 
-                # IAM section
-                writer.writerow(['IAM Roles'])
-                writer.writerow(['Total Roles', results['iam']['total_roles']])
-                writer.writerow(['Roles Quota', results['iam']['roles_quota']])
-                writer.writerow(['Usage %', results['iam']['roles_percent']])
-                writer.writerow([])
+            # RDS section
+            writer.writerow(['RDS Instances'])
+            writer.writerow(['Total Instances', results['rds']['total_instances']])
+            writer.writerow(['Underused Instances', results['rds']['underused_count']])
+            if results['rds']['underused_details']:
+                writer.writerow(['Instance Name', 'Avg CPU %', 'Engine', 'Instance Class'])
+                for db in results['rds']['underused_details']:
+                    writer.writerow([db['instance'], db['avg_cpu'], db['engine'], db['size']])
+            writer.writerow([])
 
-                # RDS section
-                writer.writerow(['RDS Instances'])
-                writer.writerow(['Total Instances', results['rds']['total_instances']])
-                writer.writerow(['Underused Instances', results['rds']['underused_count']])
-                if results['rds']['underused_details']:
-                    writer.writerow(['Instance Name', 'Avg CPU %', 'Engine', 'Instance Class'])
-                    for db in results['rds']['underused_details']:
-                        writer.writerow([db['instance'], db['avg_cpu'], db['engine'], db['size']])
-                writer.writerow([])
+            # CloudWatch Logs section
+            writer.writerow(['CloudWatch Log Groups'])
+            writer.writerow(['Total Log Groups', results['logs']['total_log_groups']])
+            writer.writerow(['Old Log Groups (>90 days)', results['logs']['old_log_groups_count']])
+            writer.writerow(['Total Storage (GB)', results['logs']['total_storage_gb']])
+            writer.writerow([])
+            writer.writerow([])
 
-                # CloudWatch Logs section
-                writer.writerow(['CloudWatch Log Groups'])
-                writer.writerow(['Total Log Groups', results['logs']['total_log_groups']])
-                writer.writerow(['Old Log Groups (>90 days)', results['logs']['old_log_groups_count']])
-                writer.writerow(['Total Storage (GB)', results['logs']['total_storage_gb']])
-                writer.writerow([])
-                writer.writerow([])
-
-        print(f"\n✓ CSV report generated: {filename}")
-        return filename
+    print(f"\n✓ CSV report generated: {filename}")
+    return filename
 
 
 def send_slack_notification(webhook_url, all_results):
@@ -551,10 +551,8 @@ def main():
         print("\n✗ No results to report")
         return
 
-    # Generate CSV report
-    csv_filename = all_results[list(all_results.keys())[0]]
-    monitor = AWSResourceMonitor(args.dev_profile, 'dev', args.region)
-    csv_filename = monitor.generate_csv_report(all_results)
+    # Generate CSV report (doesn't require AWS credentials)
+    csv_filename = generate_csv_report(all_results)
 
     # Save results to JSON if requested
     if args.output_json:
