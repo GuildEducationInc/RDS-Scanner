@@ -223,8 +223,16 @@ jobs:
 
           jq -n '{"is_monday": true}' > payload.json
 
+          echo "Payload file contents:"
+          cat payload.json
+          echo "Payload hex dump:"
+          hexdump -C payload.json
+          echo "Payload file size:"
+          wc -c payload.json
+
           aws lambda invoke \
             --function-name $FUNCTION_NAME \
+            --cli-binary-format raw-in-base64-out \
             --payload file://payload.json \
             response.json
 
