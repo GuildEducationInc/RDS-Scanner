@@ -221,7 +221,7 @@ jobs:
             --query 'Stacks[0].Outputs[?OutputKey==`LambdaFunctionName`].OutputValue' \
             --output text)
 
-          echo '{"is_monday": true}' > payload.json
+          printf '{"is_monday":true}' > payload.json
 
           aws lambda invoke \
             --function-name $FUNCTION_NAME \
