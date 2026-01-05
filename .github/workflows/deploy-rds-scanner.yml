@@ -268,10 +268,14 @@ jobs:
           esac
 
       - name: Send Slack notification
-        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
+          if [ -z "$SLACK_WEBHOOK" ]; then
+            echo "Slack webhook URL not configured, skipping notification"
+            exit 0
+          fi
+
           if [ "${{ needs.deploy.result }}" == "success" ]; then
             STATUS="Success"
             COLOR="good"
