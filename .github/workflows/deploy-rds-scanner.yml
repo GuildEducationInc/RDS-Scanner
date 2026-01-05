@@ -221,9 +221,7 @@ jobs:
             --query 'Stacks[0].Outputs[?OutputKey==`LambdaFunctionName`].OutputValue' \
             --output text)
 
-          cat > payload.json << 'PAYLOAD_EOF'
-{"is_monday":true}
-PAYLOAD_EOF
+          jq -n '{"is_monday": true}' > payload.json
 
           aws lambda invoke \
             --function-name $FUNCTION_NAME \
