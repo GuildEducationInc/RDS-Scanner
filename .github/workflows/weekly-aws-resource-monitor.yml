@@ -167,6 +167,17 @@ jobs:
           STAGE_RESULTS: ${{ needs.scan-stage-environment.outputs.results }}
           PROD_RESULTS: ${{ needs.scan-prod-environment.outputs.results }}
         run: |
+          # Function to calculate percentage
+          calc_percent() {
+            local num=$1
+            local denom=$2
+            if [ "$denom" -eq 0 ]; then
+              echo "0"
+            else
+              echo "scale=1; ($num * 100) / $denom" | bc
+            fi
+          }
+
           # Function to format environment results
           format_env_results() {
             local env_name=$1
@@ -181,6 +192,9 @@ jobs:
             # Parse JSON values
             lambda_total=$(echo "$results" | jq -r ".${env_name,,}.lambda.total_functions // 0")
             lambda_bloated=$(echo "$results" | jq -r ".${env_name,,}.lambda.version_bloat_count // 0")
+            lambda_unused=$(echo "$results" | jq -r ".${env_name,,}.lambda.unused_count // 0")
+            lambda_storage=$(echo "$results" | jq -r ".${env_name,,}.lambda.total_storage_gb // 0")
+            lambda_limit=$(echo "$results" | jq -r ".${env_name,,}.lambda.storage_limit_gb // 300")
             iam_total=$(echo "$results" | jq -r ".${env_name,,}.iam.total_roles // 0")
             iam_quota=$(echo "$results" | jq -r ".${env_name,,}.iam.roles_quota // 1000")
             rds_underused=$(echo "$results" | jq -r ".${env_name,,}.rds.underused_count // 0")
@@ -188,18 +202,21 @@ jobs:
             logs_old=$(echo "$results" | jq -r ".${env_name,,}.logs.old_log_groups_count // 0")
             logs_total=$(echo "$results" | jq -r ".${env_name,,}.logs.total_log_groups // 0")
 
-            # Get underused RDS details (avg CPU < 10% over 7 days)
-            rds_details=$(echo "$results" | jq -r ".${env_name,,}.rds.underused_details // []")
-
-            # Get old log group details (inactive > 12 months)
-            logs_details=$(echo "$results" | jq -r ".${env_name,,}.logs.old_log_groups // []")
+            # Calculate percentages
+            iam_percent=$(calc_percent $iam_total $iam_quota)
+            lambda_storage_percent=$(calc_percent ${lambda_storage%.*} $lambda_limit)
+            lambda_bloat_percent=$(calc_percent $lambda_bloated $lambda_total)
+            lambda_unused_percent=$(calc_percent $lambda_unused $lambda_total)
+            rds_percent=$(calc_percent $rds_underused $rds_total)
+            logs_percent=$(calc_percent $logs_old $logs_total)
 
             echo "*${env_name} Scan:*"
-            echo "• Total Lambda count: ${lambda_total}"
-            echo "• Bloated Lambdas (>10 versions): ${lambda_bloated}"
-            echo "• IAM Roles: ${iam_total} / ${iam_quota} (quota)"
-            echo "• Underused RDS: ${rds_underused} / ${rds_total} (avg CPU <10% over 7 days)"
-            echo "• Old CloudWatch Logs: ${logs_old} / ${logs_total} (inactive >12 months)"
+            echo "• IAM Roles: ${iam_percent}% of 100% (${iam_total}/${iam_quota})"
+            echo "• Lambda Storage: ${lambda_storage_percent}% of 100% (${lambda_storage}/${lambda_limit} GB)"
+            echo "• Bloated Lambdas: ${lambda_bloat_percent}% (${lambda_bloated}/${lambda_total})"
+            echo "• Unused Lambdas: ${lambda_unused_percent}% (${lambda_unused}/${lambda_total})"
+            echo "• Underused RDS: ${rds_percent}% (${rds_underused}/${rds_total})"
+            echo "• Old CloudWatch Logs: ${logs_percent}% (${logs_old}/${logs_total})"
           }
 
           # Build message for each environment
@@ -278,6 +295,29 @@ jobs:
                 ]
               },
               {
+                "type": "divider"
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*:bulb: Recommendations:*\n• *Delete unused IAM roles* to stay within quota limits and improve security posture\n• *Clean up old Lambda versions* - keep only 2-3 recent versions to reduce storage bloat\n• *Delete unused CloudWatch log groups* (>12 months old) to reduce storage costs\n• *Review underused RDS instances* - consider downsizing or consolidating\n  └ <https://app.datadoghq.com/dashboard/9ij-isf-e39/overprovisioned-rds?fromUser=false&offset=0&refresh_mode=yearly&from_ts=1767254400000&to_ts=1767628625022&live=true|View Overprovisioned RDS Dashboard>"
+                }
+              },
+              {
+                "type": "divider"
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*:moneybag: Understanding AWS Costs:*\n• To understand the cost on AWS resources, please use AWS Cost Explorer\n  └ <https://guild-education.atlassian.net/wiki/spaces/DEVOPS/pages/4582638174/AWS+Cost+Explorer+How+to+Analyze+Cloud+Costs|AWS Cost Explorer Guide>\n• To understand the cost on RDS particularly, refer to this Datadog dashboard\n  └ <https://app.datadoghq.com/cost/analyze/explorer?query=sum%3Aaws.cost.net.amortized.shared.resources.allocated%7Bservicename%3Ards%20AND%20aws_usage_type%3AUSW2-ExtendedSupport%3A%2A%20AND%20aws_cost_type%20IN%20%28Usage%2CDiscountedUsage%2CSavingsPlanCoveredUsage%29%20AND%20NOT%20aws_product%3Asupportenterprise%7D%20by%20%7Bteam%7D.rollup%28sum%2C%20weekly%29&anomaliesOnly=false&displayType=bars&filterRecent=false&measureType=absolute&tableViewType=breakdown&timeframeRefreshMode=paused&start=1756684800000&end=1765497599000&paused=true|RDS Cost Analysis by Team>"
+                }
+              },
+              {
+                "type": "divider"
+              },
+              {
                 "type": "context",
                 "elements": [
                   {
@@ -295,6 +335,7 @@ jobs:
           GITHUB_LINK="<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
 
           # Use jq to properly escape and replace values
+          # Block indices: 0=header, 1=date, 2=divider, 3=dev, 4=divider, 5=stage, 6=divider, 7=prod, 8=divider, 9=definitions, 10=divider, 11=recommendations, 12=divider, 13=costs, 14=divider, 15=github_link
           jq --arg header "$HEADER" \
              --arg timestamp "$TIMESTAMP" \
              --arg dev "$DEV_MSG" \
@@ -306,7 +347,7 @@ jobs:
               .blocks[3].text.text = $dev |
               .blocks[5].text.text = $stage |
               .blocks[7].text.text = $prod |
-              .blocks[10].elements[0].text = $github_link' \
+              .blocks[15].elements[0].text = $github_link' \
              /tmp/slack_payload.json > /tmp/slack_final.json
 
           # Send to Slack
