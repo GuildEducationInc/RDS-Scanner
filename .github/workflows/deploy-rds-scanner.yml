@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set environment variables
         id: set-env
@@ -85,7 +85,7 @@ jobs:
     needs: validate
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set environment variables
         id: set-env
@@ -230,7 +230,7 @@ jobs:
           cat response.json | jq . >> $GITHUB_STEP_SUMMARY
 
       - name: Upload test response
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: lambda-test-response
           path: response.json
