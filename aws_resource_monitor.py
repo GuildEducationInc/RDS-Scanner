@@ -212,8 +212,13 @@ class AWSResourceMonitor:
             'underused_details': total_underused
         }
 
-    def scan_cloudwatch_logs(self, days_threshold=90):
-        """Scan CloudWatch log groups for old/unused logs."""
+    def scan_cloudwatch_logs(self, days_threshold=90, check_streams=False):
+        """Scan CloudWatch log groups for old/unused logs.
+
+        Args:
+            days_threshold: Number of days to consider a log group old
+            check_streams: If True, check individual log streams (SLOW for large numbers)
+        """
         print(f"\n[{self.environment}] Scanning CloudWatch log groups...")
 
         log_groups = []
@@ -224,31 +229,42 @@ class AWSResourceMonitor:
 
         print(f"  Found {len(log_groups)} log groups")
 
+        # Warn if there are many log groups
+        if len(log_groups) > 10000:
+            print(f"  WARNING: Large number of log groups detected. Skipping detailed stream checks.")
+            check_streams = False
+
         old_log_groups = []
         total_storage_bytes = 0
         threshold_time = datetime.now(timezone.utc) - timedelta(days=days_threshold)
         threshold_ms = int(threshold_time.timestamp() * 1000)
 
+        processed = 0
         for log_group in log_groups:
+            processed += 1
+            if processed % 10000 == 0:
+                print(f"  Processed {processed}/{len(log_groups)} log groups...")
+
             log_group_name = log_group['logGroupName']
             storage_bytes = log_group.get('storedBytes', 0)
             total_storage_bytes += storage_bytes
 
-            # Check last event time
+            # Use creation time as baseline
             last_event_time = log_group.get('creationTime', 0)
 
-            # Try to get actual last event time from streams
-            try:
-                streams_response = self.logs_client.describe_log_streams(
-                    logGroupName=log_group_name,
-                    orderBy='LastEventTime',
-                    descending=True,
-                    limit=1
-                )
-                if streams_response['logStreams']:
-                    last_event_time = streams_response['logStreams'][0].get('lastEventTimestamp', last_event_time)
-            except:
-                pass
+            # Only check streams if explicitly requested and count is reasonable
+            if check_streams and len(log_groups) < 1000:
+                try:
+                    streams_response = self.logs_client.describe_log_streams(
+                        logGroupName=log_group_name,
+                        orderBy='LastEventTime',
+                        descending=True,
+                        limit=1
+                    )
+                    if streams_response['logStreams']:
+                        last_event_time = streams_response['logStreams'][0].get('lastEventTimestamp', last_event_time)
+                except:
+                    pass
 
             if last_event_time < threshold_ms:
                 old_log_groups.append({
@@ -256,6 +272,8 @@ class AWSResourceMonitor:
                     'storage_mb': round(storage_bytes / (1024 * 1024), 2),
                     'last_event_days': round((datetime.now(timezone.utc).timestamp() * 1000 - last_event_time) / (1000 * 86400))
                 })
+
+        print(f"  Scan complete. Identified {len(old_log_groups)} old log groups")
 
         return {
             'total_log_groups': len(log_groups),
