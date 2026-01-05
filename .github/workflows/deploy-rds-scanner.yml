@@ -223,16 +223,12 @@ jobs:
 
           jq -n '{"is_monday": true}' > payload.json
 
-          echo "Payload file contents:"
-          cat payload.json
-          echo "Payload hex dump:"
-          hexdump -C payload.json
-          echo "Payload file size:"
-          wc -c payload.json
-
+          echo "Invoking Lambda function (this may take several minutes)..."
           aws lambda invoke \
             --function-name $FUNCTION_NAME \
             --cli-binary-format raw-in-base64-out \
+            --cli-read-timeout 300 \
+            --cli-connect-timeout 60 \
             --payload file://payload.json \
             response.json
 
