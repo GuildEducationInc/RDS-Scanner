@@ -17,6 +17,8 @@ jobs:
   scan-dev-environment:
     name: Scan Dev Environment
     runs-on: ubuntu-latest
+    outputs:
+      results: ${{ steps.scan.outputs.results }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -41,13 +43,19 @@ jobs:
           aws sts get-caller-identity
 
       - name: Scan Dev resources
+        id: scan
         run: |
           python3 -u aws_resource_monitor.py \
             --skip-slack \
             --skip-csv \
             --dev-profile "" \
             --environments dev \
-            --region ${{ env.AWS_REGION }}
+            --region ${{ env.AWS_REGION }} \
+            --output-json dev_results.json
+
+          # Output JSON results for next job (compact, single line)
+          RESULTS=$(cat dev_results.json | jq -c '.')
+          echo "results=$RESULTS" >> $GITHUB_OUTPUT
         env:
           AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -56,6 +64,8 @@ jobs:
     name: Scan Stage Environment
     runs-on: ubuntu-latest
     needs: scan-dev-environment
+    outputs:
+      results: ${{ steps.scan.outputs.results }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -80,13 +90,19 @@ jobs:
           aws sts get-caller-identity
 
       - name: Scan Stage resources
+        id: scan
         run: |
           python3 -u aws_resource_monitor.py \
             --skip-slack \
             --skip-csv \
             --stage-profile "" \
             --environments stage \
-            --region ${{ env.AWS_REGION }}
+            --region ${{ env.AWS_REGION }} \
+            --output-json stage_results.json
+
+          # Output JSON results for next job (compact, single line)
+          RESULTS=$(cat stage_results.json | jq -c '.')
+          echo "results=$RESULTS" >> $GITHUB_OUTPUT
         env:
           AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -95,6 +111,8 @@ jobs:
     name: Scan Prod Environment
     runs-on: ubuntu-latest
     needs: scan-stage-environment
+    outputs:
+      results: ${{ steps.scan.outputs.results }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -119,13 +137,19 @@ jobs:
           aws sts get-caller-identity
 
       - name: Scan Prod resources
+        id: scan
         run: |
           python3 -u aws_resource_monitor.py \
             --skip-slack \
             --skip-csv \
             --prod-profile "" \
             --environments prod \
-            --region ${{ env.AWS_REGION }}
+            --region ${{ env.AWS_REGION }} \
+            --output-json prod_results.json
+
+          # Output JSON results for next job (compact, single line)
+          RESULTS=$(cat prod_results.json | jq -c '.')
+          echo "results=$RESULTS" >> $GITHUB_OUTPUT
         env:
           AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -136,55 +160,156 @@ jobs:
     needs: [scan-dev-environment, scan-stage-environment, scan-prod-environment]
     if: always()
     steps:
-      - name: Send completion notification
+      - name: Send detailed Slack notification
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DEV_RESULTS: ${{ needs.scan-dev-environment.outputs.results }}
+          STAGE_RESULTS: ${{ needs.scan-stage-environment.outputs.results }}
+          PROD_RESULTS: ${{ needs.scan-prod-environment.outputs.results }}
         run: |
+          # Function to format environment results
+          format_env_results() {
+            local env_name=$1
+            local results=$2
+            local status=$3
+
+            if [ "$status" != "success" ] || [ -z "$results" ]; then
+              echo "*${env_name} Scan:* :x: Failed to retrieve results"
+              return
+            fi
+
+            # Parse JSON values
+            lambda_total=$(echo "$results" | jq -r ".${env_name,,}.lambda.total_functions // 0")
+            lambda_bloated=$(echo "$results" | jq -r ".${env_name,,}.lambda.version_bloat_count // 0")
+            iam_total=$(echo "$results" | jq -r ".${env_name,,}.iam.total_roles // 0")
+            iam_quota=$(echo "$results" | jq -r ".${env_name,,}.iam.roles_quota // 1000")
+            rds_underused=$(echo "$results" | jq -r ".${env_name,,}.rds.underused_count // 0")
+            rds_total=$(echo "$results" | jq -r ".${env_name,,}.rds.total_instances // 0")
+            logs_old=$(echo "$results" | jq -r ".${env_name,,}.logs.old_log_groups_count // 0")
+            logs_total=$(echo "$results" | jq -r ".${env_name,,}.logs.total_log_groups // 0")
+
+            # Get underused RDS details (avg CPU < 10% over 7 days)
+            rds_details=$(echo "$results" | jq -r ".${env_name,,}.rds.underused_details // []")
+
+            # Get old log group details (inactive > 12 months)
+            logs_details=$(echo "$results" | jq -r ".${env_name,,}.logs.old_log_groups // []")
+
+            echo "*${env_name} Scan:*"
+            echo "• Total Lambda count: ${lambda_total}"
+            echo "• Bloated Lambdas (>10 versions): ${lambda_bloated}"
+            echo "• IAM Roles: ${iam_total} / ${iam_quota} (quota)"
+            echo "• Underused RDS: ${rds_underused} / ${rds_total} (avg CPU <10% over 7 days)"
+            echo "• Old CloudWatch Logs: ${logs_old} / ${logs_total} (inactive >12 months)"
+          }
+
+          # Build message for each environment
+          DEV_MSG=$(format_env_results "DEV" "$DEV_RESULTS" "${{ needs.scan-dev-environment.result }}")
+          STAGE_MSG=$(format_env_results "STAGE" "$STAGE_RESULTS" "${{ needs.scan-stage-environment.result }}")
+          PROD_MSG=$(format_env_results "PROD" "$PROD_RESULTS" "${{ needs.scan-prod-environment.result }}")
+
+          # Determine overall status
           if [ "${{ needs.scan-dev-environment.result }}" == "success" ] && [ "${{ needs.scan-stage-environment.result }}" == "success" ] && [ "${{ needs.scan-prod-environment.result }}" == "success" ]; then
-            STATUS="Success"
-            EMOJI=":white_check_mark:"
+            HEADER=":chart_with_upwards_trend: Weekly AWS Resource Monitor Scan Complete"
             COLOR="good"
           else
-            STATUS="Failed"
-            EMOJI=":x:"
-            COLOR="danger"
+            HEADER=":warning: Weekly AWS Resource Monitor Scan - Some Environments Failed"
+            COLOR="warning"
           fi
 
-          curl -X POST $SLACK_WEBHOOK \
-            -H 'Content-Type: application/json' \
-            -d '{
-              "attachments": [{
-                "color": "'"$COLOR"'",
-                "title": "'"$EMOJI"' Weekly AWS Resource Monitor Scan Complete",
-                "text": "Status: '"$STATUS"'",
-                "fields": [
+          # Create the Slack message using blocks for better formatting
+          cat > /tmp/slack_payload.json << 'PAYLOAD_EOF'
+          {
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "HEADER_PLACEHOLDER",
+                  "emoji": true
+                }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Report Date:* TIMESTAMP_PLACEHOLDER"
+                }
+              },
+              {
+                "type": "divider"
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "DEV_PLACEHOLDER"
+                }
+              },
+              {
+                "type": "divider"
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "STAGE_PLACEHOLDER"
+                }
+              },
+              {
+                "type": "divider"
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "PROD_PLACEHOLDER"
+                }
+              },
+              {
+                "type": "divider"
+              },
+              {
+                "type": "context",
+                "elements": [
                   {
-                    "title": "Workflow",
-                    "value": "Weekly AWS Resource Monitor",
-                    "short": true
-                  },
-                  {
-                    "title": "Dev Status",
-                    "value": "'"${{ needs.scan-dev-environment.result }}"'",
-                    "short": true
-                  },
-                  {
-                    "title": "Stage Status",
-                    "value": "'"${{ needs.scan-stage-environment.result }}"'",
-                    "short": true
-                  },
-                  {
-                    "title": "Prod Status",
-                    "value": "'"${{ needs.scan-prod-environment.result }}"'",
-                    "short": true
-                  },
-                  {
-                    "title": "Run ID",
-                    "value": "'"${{ github.run_id }}"'",
-                    "short": true
+                    "type": "mrkdwn",
+                    "text": ":information_source: *Definitions:* Bloated Lambdas = >10 versions | Underused RDS = avg CPU <10% (7 days) | Old Logs = inactive >12 months"
                   }
-                ],
-                "footer": "GitHub Actions",
-                "ts": '"$(date +%s)"'
-              }]
-            }'
+                ]
+              },
+              {
+                "type": "context",
+                "elements": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "GITHUB_LINK_PLACEHOLDER"
+                  }
+                ]
+              }
+            ]
+          }
+          PAYLOAD_EOF
+
+          # Replace placeholders
+          TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S UTC')
+          GITHUB_LINK="<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
+
+          # Use jq to properly escape and replace values
+          jq --arg header "$HEADER" \
+             --arg timestamp "$TIMESTAMP" \
+             --arg dev "$DEV_MSG" \
+             --arg stage "$STAGE_MSG" \
+             --arg prod "$PROD_MSG" \
+             --arg github_link "$GITHUB_LINK" \
+             '.blocks[0].text.text = $header |
+              .blocks[1].text.text = ("*Report Date:* " + $timestamp) |
+              .blocks[3].text.text = $dev |
+              .blocks[5].text.text = $stage |
+              .blocks[7].text.text = $prod |
+              .blocks[10].elements[0].text = $github_link' \
+             /tmp/slack_payload.json > /tmp/slack_final.json
+
+          # Send to Slack
+          curl -X POST "$SLACK_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d @/tmp/slack_final.json
