@@ -183,23 +183,26 @@ jobs:
             lambda_bloated=$(echo "$results" | jq -r ".${env_name,,}.lambda.version_bloat_count // 0")
             iam_total=$(echo "$results" | jq -r ".${env_name,,}.iam.total_roles // 0")
             iam_quota=$(echo "$results" | jq -r ".${env_name,,}.iam.roles_quota // 1000")
+            iam_percentage=$(( iam_quota > 0 ? (iam_total * 100) / iam_quota : 0 ))
             rds_underused=$(echo "$results" | jq -r ".${env_name,,}.rds.underused_count // 0")
             rds_total=$(echo "$results" | jq -r ".${env_name,,}.rds.total_instances // 0")
-            logs_old=$(echo "$results" | jq -r ".${env_name,,}.logs.old_log_groups_count // 0")
+            rds_underused_percentage=$(( rds_total > 0 ? (rds_underused * 100) / rds_total : 0 ))
+            logs_inactive=$(echo "$results" | jq -r ".${env_name,,}.logs.inactive_log_groups_count // 0")
             logs_total=$(echo "$results" | jq -r ".${env_name,,}.logs.total_log_groups // 0")
+            logs_inactive_percentage=$(( logs_total > 0 ? (logs_inactive * 100) / logs_total : 0 ))
 
             # Get underused RDS details (avg CPU < 10% over 7 days)
             rds_details=$(echo "$results" | jq -r ".${env_name,,}.rds.underused_details // []")
 
-            # Get old log group details (inactive > 12 months)
-            logs_details=$(echo "$results" | jq -r ".${env_name,,}.logs.old_log_groups // []")
+            # Get inactive log group details (inactive > 12 months)
+            logs_details=$(echo "$results" | jq -r ".${env_name,,}.logs.inactive_log_groups // []")
 
             echo "*${env_name} Scan:*"
             echo "• Total Lambda count: ${lambda_total}"
             echo "• Bloated Lambdas (>10 versions): ${lambda_bloated}"
-            echo "• IAM Roles: ${iam_total} / ${iam_quota} (quota)"
-            echo "• Underused RDS: ${rds_underused} / ${rds_total} (avg CPU <10% over 7 days)"
-            echo "• Old CloudWatch Logs: ${logs_old} / ${logs_total} (inactive >12 months)"
+            echo "• IAM Roles: ${iam_percentage}% or ${iam_total} / ${iam_quota} (quota)"
+            echo "• Underused RDS: ${rds_underused_percentage}% or ${rds_underused} / ${rds_total} (avg CPU <10% over 7 days)"
+            echo "• Inactive CloudWatch Logs: ${logs_inactive_percentage}% or ${logs_inactive} / ${logs_total} (inactive >12 months)"
           }
 
           # Build message for each environment
@@ -273,7 +276,7 @@ jobs:
                 "elements": [
                   {
                     "type": "mrkdwn",
-                    "text": ":information_source: *Definitions:* Bloated Lambdas = >10 versions | Underused RDS = avg CPU <10% (7 days) | Old Logs = inactive >12 months"
+                    "text": ":information_source: *Definitions:* Bloated Lambdas = >10 versions | Underused RDS = avg CPU <10% (7 days) | Inactive Logs = inactive >12 months"
                   }
                 ]
               },
