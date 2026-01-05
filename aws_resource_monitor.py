@@ -385,6 +385,12 @@ def send_slack_notification(webhook_url, all_results):
         lambda_emoji = "🔴" if results['lambda']['storage_percent'] > 70 else "🟡" if results['lambda']['storage_percent'] > 50 else "🟢"
         iam_emoji = "🔴" if results['iam']['roles_percent'] > 80 else "🟡" if results['iam']['roles_percent'] > 60 else "🟢"
 
+        # Calculate percentages
+        rds_underused_percent = round((results['rds']['underused_count'] / results['rds']['total_instances'] * 100), 1) if results['rds']['total_instances'] > 0 else 0
+        logs_old_percent = round((results['logs']['old_log_groups_count'] / results['logs']['total_log_groups'] * 100), 1) if results['logs']['total_log_groups'] > 0 else 0
+        lambda_unused_percent = round((results['lambda']['unused_count'] / results['lambda']['total_functions'] * 100), 1) if results['lambda']['total_functions'] > 0 else 0
+        lambda_bloat_percent = round((results['lambda']['version_bloat_count'] / results['lambda']['total_functions'] * 100), 1) if results['lambda']['total_functions'] > 0 else 0
+
         blocks.extend([
             {
                 "type": "section",
@@ -398,11 +404,11 @@ def send_slack_notification(webhook_url, all_results):
                 "fields": [
                     {
                         "type": "mrkdwn",
-                        "text": f"{iam_emoji} *IAM Roles in {env_upper}*\n{results['iam']['total_roles']} / {results['iam']['roles_quota']} ({results['iam']['roles_percent']}%)"
+                        "text": f"{iam_emoji} *IAM Roles in {env_upper}*\n{results['iam']['roles_percent']}% of 100% ({results['iam']['total_roles']}/{results['iam']['roles_quota']})"
                     },
                     {
                         "type": "mrkdwn",
-                        "text": f"{lambda_emoji} *Lambda Storage in {env_upper}*\n{results['lambda']['total_storage_gb']} / {results['lambda']['storage_limit_gb']} GB ({results['lambda']['storage_percent']}%)"
+                        "text": f"{lambda_emoji} *Lambda Storage in {env_upper}*\n{results['lambda']['storage_percent']}% of 100% ({results['lambda']['total_storage_gb']}/{results['lambda']['storage_limit_gb']} GB)"
                     }
                 ]
             },
@@ -411,11 +417,11 @@ def send_slack_notification(webhook_url, all_results):
                 "fields": [
                     {
                         "type": "mrkdwn",
-                        "text": f"*Bloated Lambdas:* {results['lambda']['version_bloat_count']}\n*Unused Lambdas:* {results['lambda']['unused_count']}"
+                        "text": f"*Bloated Lambdas:* {lambda_bloat_percent}% ({results['lambda']['version_bloat_count']}/{results['lambda']['total_functions']})\n*Unused Lambdas:* {lambda_unused_percent}% ({results['lambda']['unused_count']}/{results['lambda']['total_functions']})"
                     },
                     {
                         "type": "mrkdwn",
-                        "text": f"*Underused RDS:* {results['rds']['underused_count']} / {results['rds']['total_instances']}"
+                        "text": f"*Underused RDS:* {rds_underused_percent}% ({results['rds']['underused_count']}/{results['rds']['total_instances']})"
                     }
                 ]
             },
@@ -423,7 +429,7 @@ def send_slack_notification(webhook_url, all_results):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*Old CloudWatch Logs:* {results['logs']['old_log_groups_count']} log groups (>12 months) | Total: {results['logs']['total_storage_gb']} GB"
+                    "text": f"*Old CloudWatch Logs:* {logs_old_percent}% ({results['logs']['old_log_groups_count']}/{results['logs']['total_log_groups']} log groups >12 months) | Total Storage: {results['logs']['total_storage_gb']} GB"
                 }
             },
             {
@@ -441,7 +447,22 @@ def send_slack_notification(webhook_url, all_results):
                         "• *Delete unused IAM roles* to stay within quota limits and improve security posture\n"
                         "• *Clean up old Lambda versions* - keep only 2-3 recent versions to reduce storage bloat\n"
                         "• *Delete unused CloudWatch log groups* (>12 months old) to reduce storage costs\n"
-                        "• *Review underused RDS instances* - consider downsizing or consolidating"
+                        "• *Review underused RDS instances* - consider downsizing or consolidating\n"
+                        "  └ <https://app.datadoghq.com/dashboard/9ij-isf-e39/overprovisioned-rds?fromUser=false&offset=0&refresh_mode=yearly&from_ts=1767254400000&to_ts=1767628625022&live=true|View Overprovisioned RDS Dashboard>"
+            }
+        },
+        {
+            "type": "divider"
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*💰 Understanding AWS Costs:*\n"
+                        "• To understand the cost on AWS resources, please use AWS Cost Explorer\n"
+                        "  └ <https://guild-education.atlassian.net/wiki/spaces/DEVOPS/pages/4582638174/AWS+Cost+Explorer+How+to+Analyze+Cloud+Costs|AWS Cost Explorer Guide>\n"
+                        "• To understand the cost on RDS particularly, refer to this Datadog dashboard\n"
+                        "  └ <https://app.datadoghq.com/cost/analyze/explorer?query=sum%3Aaws.cost.net.amortized.shared.resources.allocated%7Bservicename%3Ards%20AND%20aws_usage_type%3AUSW2-ExtendedSupport%3A%2A%20AND%20aws_cost_type%20IN%20%28Usage%2CDiscountedUsage%2CSavingsPlanCoveredUsage%29%20AND%20NOT%20aws_product%3Asupportenterprise%7D%20by%20%7Bteam%7D.rollup%28sum%2C%20weekly%29&anomaliesOnly=false&displayType=bars&filterRecent=false&measureType=absolute&tableViewType=breakdown&timeframeRefreshMode=paused&start=1756684800000&end=1765497599000&paused=true|RDS Cost Analysis by Team>"
             }
         },
         {
