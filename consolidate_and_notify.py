@@ -56,6 +56,21 @@ def send_consolidated_slack_notification(webhook_url, all_results):
         },
         {
             "type": "divider"
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*📋 Definitions & Limits:*\n"
+                        "• *IAM Roles Limit:* Default AWS quota is 1,000 roles per account\n"
+                        "• *Lambda Storage Limit:* 75 GB default (can be increased to 300 GB)\n"
+                        "• *Bloated Lambdas:* Functions with >10 versions consuming extra storage\n"
+                        "• *Underused RDS:* Instances with <10% average CPU over 7 days\n"
+                        "• *Old CloudWatch Logs:* Log groups with no activity for >12 months"
+            }
+        },
+        {
+            "type": "divider"
         }
     ]
 
@@ -104,13 +119,31 @@ def send_consolidated_slack_notification(webhook_url, all_results):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*Old CloudWatch Logs:* {results['logs']['old_log_groups_count']} log groups (>90 days) | Total: {results['logs']['total_storage_gb']} GB"
+                    "text": f"*Old CloudWatch Logs:* {results['logs']['old_log_groups_count']} log groups (>12 months) | Total: {results['logs']['total_storage_gb']} GB"
                 }
             },
             {
                 "type": "divider"
             }
         ])
+
+    # Add recommendations section
+    blocks.extend([
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*💡 Recommendations:*\n"
+                        "• *Delete unused IAM roles* to stay within quota limits and improve security posture\n"
+                        "• *Clean up old Lambda versions* - keep only 2-3 recent versions to reduce storage bloat\n"
+                        "• *Delete unused CloudWatch log groups* (>12 months old) to reduce storage costs\n"
+                        "• *Review underused RDS instances* - consider downsizing or consolidating"
+            }
+        },
+        {
+            "type": "divider"
+        }
+    ])
 
     # Add footer
     github_run_url = os.environ.get('GITHUB_RUN_URL')

@@ -212,11 +212,11 @@ class AWSResourceMonitor:
             'underused_details': total_underused
         }
 
-    def scan_cloudwatch_logs(self, days_threshold=90, check_streams=False):
+    def scan_cloudwatch_logs(self, days_threshold=365, check_streams=False):
         """Scan CloudWatch log groups for old/unused logs.
 
         Args:
-            days_threshold: Number of days to consider a log group old
+            days_threshold: Number of days to consider a log group old (default: 365 = 12 months)
             check_streams: If True, check individual log streams (SLOW for large numbers)
         """
         print(f"\n[{self.environment}] Scanning CloudWatch log groups...")
@@ -329,7 +329,7 @@ def generate_csv_report(all_results):
             # CloudWatch Logs section
             writer.writerow(['CloudWatch Log Groups'])
             writer.writerow(['Total Log Groups', results['logs']['total_log_groups']])
-            writer.writerow(['Old Log Groups (>90 days)', results['logs']['old_log_groups_count']])
+            writer.writerow(['Old Log Groups (>12 months)', results['logs']['old_log_groups_count']])
             writer.writerow(['Total Storage (GB)', results['logs']['total_storage_gb']])
             writer.writerow([])
             writer.writerow([])
@@ -356,6 +356,21 @@ def send_slack_notification(webhook_url, all_results):
             "text": {
                 "type": "mrkdwn",
                 "text": f"*Report Date:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            }
+        },
+        {
+            "type": "divider"
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*📋 Definitions & Limits:*\n"
+                        "• *IAM Roles Limit:* Default AWS quota is 1,000 roles per account\n"
+                        "• *Lambda Storage Limit:* 75 GB default (can be increased to 300 GB)\n"
+                        "• *Bloated Lambdas:* Functions with >10 versions consuming extra storage\n"
+                        "• *Underused RDS:* Instances with <10% average CPU over 7 days\n"
+                        "• *Old CloudWatch Logs:* Log groups with no activity for >12 months"
             }
         },
         {
@@ -408,13 +423,31 @@ def send_slack_notification(webhook_url, all_results):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*Old CloudWatch Logs:* {results['logs']['old_log_groups_count']} log groups (>90 days) | Total: {results['logs']['total_storage_gb']} GB"
+                    "text": f"*Old CloudWatch Logs:* {results['logs']['old_log_groups_count']} log groups (>12 months) | Total: {results['logs']['total_storage_gb']} GB"
                 }
             },
             {
                 "type": "divider"
             }
         ])
+
+    # Add recommendations section
+    blocks.extend([
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*💡 Recommendations:*\n"
+                        "• *Delete unused IAM roles* to stay within quota limits and improve security posture\n"
+                        "• *Clean up old Lambda versions* - keep only 2-3 recent versions to reduce storage bloat\n"
+                        "• *Delete unused CloudWatch log groups* (>12 months old) to reduce storage costs\n"
+                        "• *Review underused RDS instances* - consider downsizing or consolidating"
+            }
+        },
+        {
+            "type": "divider"
+        }
+    ])
 
     # Add CSV report info
     csv_report_text = "💾 Detailed CSV report generated"
