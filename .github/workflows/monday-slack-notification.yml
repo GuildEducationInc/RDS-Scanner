@@ -1,211 +1,40 @@
-name: Weekly AWS Resource Monitor
+name: Monday Slack Notification
 
 on:
   schedule:
-    # Scan runs Sunday at midnight Mountain Time (7:00 AM UTC Sunday)
-    - cron: '0 7 * * 0'
+    # Run Monday at 8:00 AM Mountain Time (3:00 PM UTC Monday)
+    - cron: '0 15 * * 1'
   workflow_dispatch:  # Allow manual triggering
-    inputs:
-      send_notification:
-        description: 'Send Slack notification immediately after scan'
-        required: false
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-
-permissions:
-  id-token: write
-  contents: read
-
-env:
-  AWS_REGION: us-west-2
 
 jobs:
-  scan-dev-environment:
-    name: Scan Dev Environment
+  send-notification:
+    name: Send Weekly Report Notification
     runs-on: ubuntu-latest
-    outputs:
-      results: ${{ steps.scan.outputs.results }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Download latest scan results
+        uses: dawidd6/action-download-artifact@v3
         with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements-monitor.txt
-
-      - name: Assume AWS Dev role
-        uses: aws-actions/configure-aws-credentials@v5
-        with:
-          role-to-assume: arn:aws:iam::477873552632:role/devops-deploy-role
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Verify AWS identity
-        run: |
-          aws sts get-caller-identity
-
-      - name: Scan Dev resources
-        id: scan
-        run: |
-          python3 -u aws_resource_monitor.py \
-            --skip-slack \
-            --skip-csv \
-            --dev-profile "" \
-            --environments dev \
-            --region ${{ env.AWS_REGION }} \
-            --output-json dev_results.json
-
-          # Output JSON results for next job (compact, single line)
-          RESULTS=$(cat dev_results.json | jq -c '.')
-          echo "results=$RESULTS" >> $GITHUB_OUTPUT
-        env:
-          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
-          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-  scan-stage-environment:
-    name: Scan Stage Environment
-    runs-on: ubuntu-latest
-    needs: scan-dev-environment
-    outputs:
-      results: ${{ steps.scan.outputs.results }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements-monitor.txt
-
-      - name: Assume AWS Stage role
-        uses: aws-actions/configure-aws-credentials@v5
-        with:
-          role-to-assume: arn:aws:iam::221203628080:role/devops-deploy-role
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Verify AWS identity
-        run: |
-          aws sts get-caller-identity
-
-      - name: Scan Stage resources
-        id: scan
-        run: |
-          python3 -u aws_resource_monitor.py \
-            --skip-slack \
-            --skip-csv \
-            --stage-profile "" \
-            --environments stage \
-            --region ${{ env.AWS_REGION }} \
-            --output-json stage_results.json
-
-          # Output JSON results for next job (compact, single line)
-          RESULTS=$(cat stage_results.json | jq -c '.')
-          echo "results=$RESULTS" >> $GITHUB_OUTPUT
-        env:
-          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
-          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-  scan-prod-environment:
-    name: Scan Prod Environment
-    runs-on: ubuntu-latest
-    needs: scan-stage-environment
-    outputs:
-      results: ${{ steps.scan.outputs.results }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements-monitor.txt
-
-      - name: Assume AWS Prod role
-        uses: aws-actions/configure-aws-credentials@v5
-        with:
-          role-to-assume: arn:aws:iam::947618278001:role/devops-deploy-role
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Verify AWS identity
-        run: |
-          aws sts get-caller-identity
-
-      - name: Scan Prod resources
-        id: scan
-        run: |
-          python3 -u aws_resource_monitor.py \
-            --skip-slack \
-            --skip-csv \
-            --prod-profile "" \
-            --environments prod \
-            --region ${{ env.AWS_REGION }} \
-            --output-json prod_results.json
-
-          # Output JSON results for next job (compact, single line)
-          RESULTS=$(cat prod_results.json | jq -c '.')
-          echo "results=$RESULTS" >> $GITHUB_OUTPUT
-        env:
-          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
-          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-  save-results:
-    name: Save Scan Results
-    runs-on: ubuntu-latest
-    needs: [scan-dev-environment, scan-stage-environment, scan-prod-environment]
-    if: always()
-    steps:
-      - name: Save results to artifact
-        env:
-          DEV_RESULTS: ${{ needs.scan-dev-environment.outputs.results }}
-          STAGE_RESULTS: ${{ needs.scan-stage-environment.outputs.results }}
-          PROD_RESULTS: ${{ needs.scan-prod-environment.outputs.results }}
-          DEV_STATUS: ${{ needs.scan-dev-environment.result }}
-          STAGE_STATUS: ${{ needs.scan-stage-environment.result }}
-          PROD_STATUS: ${{ needs.scan-prod-environment.result }}
-        run: |
-          mkdir -p scan-results
-          echo "$DEV_RESULTS" > scan-results/dev.json
-          echo "$STAGE_RESULTS" > scan-results/stage.json
-          echo "$PROD_RESULTS" > scan-results/prod.json
-          echo "{\"dev\": \"$DEV_STATUS\", \"stage\": \"$STAGE_STATUS\", \"prod\": \"$PROD_STATUS\"}" > scan-results/status.json
-          echo "${{ github.run_id }}" > scan-results/run_id.txt
-
-      - name: Upload scan results artifact
-        uses: actions/upload-artifact@v4
-        with:
+          workflow: weekly-aws-resource-monitor.yml
           name: weekly-scan-results
           path: scan-results/
-          retention-days: 7
+          search_artifacts: true
+          if_no_artifact_found: fail
 
-  notify-completion:
-    name: Notify Scan Completion
-    runs-on: ubuntu-latest
-    needs: [scan-dev-environment, scan-stage-environment, scan-prod-environment, save-results]
-    # Send notification immediately for manual runs (if enabled) or skip for scheduled runs
-    if: always() && (github.event_name == 'workflow_dispatch' && github.event.inputs.send_notification == 'true')
-    steps:
       - name: Send detailed Slack notification
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
-          DEV_RESULTS: ${{ needs.scan-dev-environment.outputs.results }}
-          STAGE_RESULTS: ${{ needs.scan-stage-environment.outputs.results }}
-          PROD_RESULTS: ${{ needs.scan-prod-environment.outputs.results }}
         run: |
+          # Load results from artifacts
+          DEV_RESULTS=$(cat scan-results/dev.json)
+          STAGE_RESULTS=$(cat scan-results/stage.json)
+          PROD_RESULTS=$(cat scan-results/prod.json)
+          STATUS=$(cat scan-results/status.json)
+          SCAN_RUN_ID=$(cat scan-results/run_id.txt)
+
+          DEV_STATUS=$(echo "$STATUS" | jq -r '.dev')
+          STAGE_STATUS=$(echo "$STATUS" | jq -r '.stage')
+          PROD_STATUS=$(echo "$STATUS" | jq -r '.prod')
+
           # Function to calculate percentage
           calc_percent() {
             local num=$1
@@ -223,7 +52,7 @@ jobs:
             local results=$2
             local status=$3
 
-            if [ "$status" != "success" ] || [ -z "$results" ]; then
+            if [ "$status" != "success" ] || [ -z "$results" ] || [ "$results" == "null" ]; then
               echo "*${env_name} Scan:* :x: Failed to retrieve results"
               return
             fi
@@ -259,16 +88,16 @@ jobs:
           }
 
           # Build message for each environment
-          DEV_MSG=$(format_env_results "DEV" "$DEV_RESULTS" "${{ needs.scan-dev-environment.result }}")
-          STAGE_MSG=$(format_env_results "STAGE" "$STAGE_RESULTS" "${{ needs.scan-stage-environment.result }}")
-          PROD_MSG=$(format_env_results "PROD" "$PROD_RESULTS" "${{ needs.scan-prod-environment.result }}")
+          DEV_MSG=$(format_env_results "DEV" "$DEV_RESULTS" "$DEV_STATUS")
+          STAGE_MSG=$(format_env_results "STAGE" "$STAGE_RESULTS" "$STAGE_STATUS")
+          PROD_MSG=$(format_env_results "PROD" "$PROD_RESULTS" "$PROD_STATUS")
 
           # Determine overall status
-          if [ "${{ needs.scan-dev-environment.result }}" == "success" ] && [ "${{ needs.scan-stage-environment.result }}" == "success" ] && [ "${{ needs.scan-prod-environment.result }}" == "success" ]; then
-            HEADER=":chart_with_upwards_trend: Weekly AWS Resource Monitor Scan Complete"
+          if [ "$DEV_STATUS" == "success" ] && [ "$STAGE_STATUS" == "success" ] && [ "$PROD_STATUS" == "success" ]; then
+            HEADER=":chart_with_upwards_trend: Weekly AWS Resource Monitor Report"
             COLOR="good"
           else
-            HEADER=":warning: Weekly AWS Resource Monitor Scan - Some Environments Failed"
+            HEADER=":warning: Weekly AWS Resource Monitor Report - Some Environments Failed"
             COLOR="warning"
           fi
 
@@ -370,8 +199,8 @@ jobs:
           PAYLOAD_EOF
 
           # Replace placeholders
-          TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S UTC')
-          GITHUB_LINK="<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
+          TIMESTAMP=$(TZ='America/Denver' date '+%Y-%m-%d %H:%M:%S %Z')
+          GITHUB_LINK="<${{ github.server_url }}/${{ github.repository }}/actions/runs/${SCAN_RUN_ID}|View scan workflow run>"
 
           # Use jq to properly escape and replace values
           # Block indices: 0=header, 1=date, 2=divider, 3=dev, 4=divider, 5=stage, 6=divider, 7=prod, 8=divider, 9=definitions, 10=divider, 11=recommendations, 12=divider, 13=costs, 14=divider, 15=github_link
